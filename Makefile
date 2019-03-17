@@ -50,12 +50,12 @@ install:
 	rm -rf ${envDir}
 	virtualenv --python=${PYTHON} --prompt=${envPrompt} ${envDir}
 	source ${envDir}/bin/activate && \
-	    pip install pip --upgrade && \
+	    python3 -m pip install pip --upgrade && \
 	    mkdir -p build/wheelhouse && \
-	    pip download --dest build/wheelhouse ${TORCH} && \
-	    pip install --find-links build/wheelhouse --no-index torch && \
-	    pip install -r requirements.txt ${CUPY} && \
-	    pip install -r develop_requirements.txt && \
+	    python3 -m pip download --dest build/wheelhouse ${TORCH} && \
+	    python3 -m pip install --find-links build/wheelhouse --no-index torch && \
+	    python3 -m pip install -r requirements.txt ${CUPY} && \
+	    python3 -m pip install -r develop_requirements.txt && \
 	    ${PYTHON} setup.py develop
 	@echo "To activate your new environment:  source ${envDir}/bin/activate"
 
