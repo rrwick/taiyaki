@@ -86,15 +86,16 @@ def generate_output_from_results(results, args):
                          (with mappings)
     param: args        : command line args object
     """
-    progress = helpers.Progress()
+    # progress = helpers.Progress()
 
     # filter removes None and False and 0; filter(None,  is same as filter(o:o,
     read_ids = []
     with mapped_signal_files.HDF5(args.output, "w") as f:
         f.write_version_number()
         for readnumber, resultdict in enumerate(filter(None, results)):
-            progress.step()
+            # progress.step()
             read_id = resultdict['read_id']
+            print(read_id, flush=True)
             read_ids.append(read_id)
             f.write_read(read_id, mapped_signal_files.Read(resultdict))
 
