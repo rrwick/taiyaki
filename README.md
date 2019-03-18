@@ -1,3 +1,10 @@
+I made this fork of Taiyaki so I could fiddle with the scripts and make some changes specific to the computing cluster I use:
+* Changed pip calls in the Makefile (not sure why but my cluster prefers `python3 -m pip` over just `pip`.
+* Changed the progress indicator in `prepare_mapped_reads.py` to show read IDs.
+
+The original Taiyaki README follows:<br><br><br>
+
+
 <p align="center">
   <img src="ONT_logo.png">
 </p>
