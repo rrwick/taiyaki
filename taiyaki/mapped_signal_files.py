@@ -8,6 +8,7 @@
 from abc import ABC, abstractmethod
 import h5py
 import numpy as np
+import random
 
 _version = 7
 
@@ -413,7 +414,7 @@ class AbstractMappedSignalFile(ABC):
         else:
             read_ids_used = set(read_id_list).intersection(read_ids_in_file)
         if max_reads is not None and max_reads < len(read_ids_used):
-            read_ids_used = list(read_ids_used)[:max_reads]
+            read_ids_used = random.sample(list(read_ids_used), max_reads)  # choose a random subset
         if return_list:
             # Make a new read object containing the read_id as well as other items, for each read id in the list
             return [Read({**self.get_read(read_id), 'read_id': read_id}) for read_id in read_ids_used]

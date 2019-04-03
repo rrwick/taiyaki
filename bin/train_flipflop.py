@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 from collections import defaultdict
+import gc
 import numpy as np
 import os
 import random
@@ -47,9 +48,12 @@ parser.add_argument('--stride', default=2, metavar='samples', type=Positive(int)
                     help='Stride for model')
 parser.add_argument('--winlen', default=19, type=Positive(int),
                     help='Length of window over data')
+
+parser.add_argument('--reload_after_batches', default=500, type=Positive(int),
+                    help='Reload training data after this many batches (only used if --limit is set)')
+
 parser.add_argument('model', action=FileExists,
                     help='File to read python model description from')
-
 parser.add_argument('output', help='Prefix for output files')
 parser.add_argument('input', action=FilesExist, nargs='+',
                     help='files containing mapped reads')
@@ -65,6 +69,19 @@ def save_model(network, output, index=None):
     torch.save(network, model_file)
     params_file = os.path.join(output, basename + '.params')
     torch.save(network.state_dict(), params_file)
+
+
+def load_read_data(input_files, read_limit):
+    read_data = []
+    for input_file in input_files:
+        log.write('* Loading data from {}\n'.format(input_file))
+        log.write('* Per read file MD5 {}\n'.format(helpers.file_md5(input_file)))
+        with mapped_signal_files.HDF5(input_file, "r") as per_read_file:
+            read_data += per_read_file.get_multiple_reads(read_ids, max_reads=read_limit)
+            # read_data now contains a list of reads
+            # (each an instance of the Read class defined in mapped_signal_files.py, based on dict)
+    random.shuffle(read_data)
+    return read_data
 
 
 if __name__ == '__main__':
@@ -106,16 +123,7 @@ if __name__ == '__main__':
     if args.limit is not None:
         log.write('* Limiting number of strands to {} per file\n'.format(args.limit))
 
-    read_data = []
-    for input_file in args.input:
-        log.write('* Loading data from {}\n'.format(input_file))
-        log.write('* Per read file MD5 {}\n'.format(helpers.file_md5(input_file)))
-        with mapped_signal_files.HDF5(input_file, "r") as per_read_file:
-            read_data += per_read_file.get_multiple_reads(read_ids, max_reads=args.limit)
-            # read_data now contains a list of reads
-            # (each an instance of the Read class defined in mapped_signal_files.py, based on dict)
-    random.shuffle(read_data)
-
+    read_data = load_read_data(args.input, args.limit)
     log.write('* Loaded {} reads.\n'.format(len(read_data)))
 
     # Get parameters for filtering by sampling a subset of the reads
@@ -249,5 +257,11 @@ if __name__ == '__main__':
             total_bases = 0
             total_samples = 0
             t0 = tn
+
+        if args.limit is not None and (i + 1) % args.reload_after_batches == 0:
+            # Periodically reload the training data to get a different random subset.
+            read_data = None
+            gc.collect()
+            read_data = load_read_data(args.input, args.limit)
 
     save_model(network, args.output)
