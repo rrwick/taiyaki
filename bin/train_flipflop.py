@@ -3,13 +3,14 @@ import argparse
 from collections import defaultdict
 import numpy as np
 import os
+import random
 from shutil import copyfile
 import sys
 import time
 
 import torch
 import taiyaki.common_cmdargs as common_cmdargs
-from taiyaki.cmdargs import (FileExists, NonNegative, Positive, proportion)
+from taiyaki.cmdargs import (FileExists, FilesExist, NonNegative, Positive, proportion)
 
 from taiyaki import chunk_selection, ctc, flipflopfings, helpers, mapped_signal_files, variables
 from taiyaki import __version__
@@ -50,8 +51,8 @@ parser.add_argument('model', action=FileExists,
                     help='File to read python model description from')
 
 parser.add_argument('output', help='Prefix for output files')
-parser.add_argument('input', action=FileExists,
-                    help='file containing mapped reads')
+parser.add_argument('input', action=FilesExist, nargs='+',
+                    help='files containing mapped reads')
 
 
 def save_model(network, output, index=None):
@@ -94,8 +95,6 @@ if __name__ == '__main__':
     log.write('* Taiyaki version {}\n'.format(__version__))
     log.write('* Command line\n')
     log.write(' '.join(sys.argv) + '\n')
-    log.write('* Loading data from {}\n'.format(args.input))
-    log.write('* Per read file MD5 {}\n'.format(helpers.file_md5(args.input)))
 
     if args.input_strand_list is not None:
         read_ids = list(set(helpers.get_read_ids(args.input_strand_list)))
@@ -105,13 +104,17 @@ if __name__ == '__main__':
         read_ids = 'all'
 
     if args.limit is not None:
-        log.write('* Limiting number of strands to {}\n'.format(args.limit))
+        log.write('* Limiting number of strands to {} per file\n'.format(args.limit))
 
-    with mapped_signal_files.HDF5(args.input, "r") as per_read_file:
-        read_data = per_read_file.get_multiple_reads(read_ids, max_reads=args.limit)
-        # read_data now contains a list of reads
-        # (each an instance of the Read class defined in mapped_signal_files.py, based on dict)
-
+    read_data = []
+    for input_file in args.input:
+        log.write('* Loading data from {}\n'.format(input_file))
+        log.write('* Per read file MD5 {}\n'.format(helpers.file_md5(input_file)))
+        with mapped_signal_files.HDF5(input_file, "r") as per_read_file:
+            read_data += per_read_file.get_multiple_reads(read_ids, max_reads=args.limit)
+            # read_data now contains a list of reads
+            # (each an instance of the Read class defined in mapped_signal_files.py, based on dict)
+    random.shuffle(read_data)
 
     log.write('* Loaded {} reads.\n'.format(len(read_data)))
 
