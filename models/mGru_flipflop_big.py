@@ -3,7 +3,7 @@ from taiyaki.activation import tanh
 from taiyaki.layers import Convolution, GruMod, Reverse, Serial, GlobalNormFlipFlop
 
 
-def network(insize=1, size=512, winlen=19, stride=4, outsize=40):
+def network(insize=1, size=512, winlen=19, stride=2, outsize=40):
     nbase = nbase_flipflop(outsize)
 
     return Serial([
