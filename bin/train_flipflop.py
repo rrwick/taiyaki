@@ -273,7 +273,7 @@ def main():
             # Periodically reload the training data to get a different random subset.
             read_data = None
             gc.collect()
-            read_data = load_read_data(args.input, args.limit, log, read_ids)
+            read_data, _ = load_read_data(args.input, args.limit, log, read_ids)
 
     helpers.save_model(network, args.output)
 
