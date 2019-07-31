@@ -1,3 +1,4 @@
+from collections import defaultdict
 import numpy as np
 import sys
 from ont_fast5_api import fast5_interface
@@ -7,8 +8,15 @@ from taiyaki.config import taiyaki_dtype
 from taiyaki.fileio import readtsv
 
 
+READ_ID_INFO_NOT_FOUND_ERR_TEXT = 'No information for read id found in file.'
+NO_REF_FOUND_ERR_TEXT = 'No fasta reference found.'
+NO_PARAMS_ERR_TEXT = 'No per-read params provided.'
+REMAP_ERR_TEXT = 'Failure applying basecall network to remap read.'
+REMAP_SUCCESS_TEXT = ''
+
+
 def oneread_remap(read_tuple, references, model, device, per_read_params_dict,
-                  alphabet, collapse_alphabet):
+                  alphabet_info):
     """ Worker function for remapping reads using flip-flop model on raw signal
     :param read_tuple                 : read, identified by a tuple (filepath, read_id)
     :param references                 :dict mapping fast5 filenames to reference strings
@@ -16,31 +24,28 @@ def oneread_remap(read_tuple, references, model, device, per_read_params_dict,
     :param device                     :integer specifying which GPU to use for remapping, or 'cpu' to use CPU
     :param per_read_params_dict       :dictionary where keys are UUIDs, values are dicts containing keys
                                          trim_start trim_end shift scale
-    :param alphabet                   : alphabet for basecalling (passed on to mapped-read file)
-    :param collapse_alphabet          : collapsed alphabet for basecalling (passed on to mapped-read file)
+    :param alphabet_info              : AlphabetInfo object for basecalling
 
-    :returns: dictionary as specified in mapped_signal_files.Read class
+    :returns: tuple of dictionary as specified in mapped_signal_files.Read class
+              and a message string indicating an error if one occured
     """
     filename, read_id = read_tuple
     try:
         with fast5_interface.get_fast5_file(filename, 'r') as f5file:
             read = f5file.get_read(read_id)
             sig = signal.Signal(read)
-    except Exception as e:
-        # We want any single failure in the batch of reads to not disrupt other reads being processed.
-        sys.stderr.write('No read information on read {} found in file {}.\n{}\n'.format(read_id, filename, repr(e)))
-        return None
+    except Exception:
+        return None, READ_ID_INFO_NOT_FOUND_ERR_TEXT
 
     if read_id in references:
-        read_ref = references[read_id].decode("utf-8")
+        read_ref = references[read_id]
     else:
-        sys.stderr.write('No fasta reference found for {}.\n'.format(read_id))
-        return None
+        return None, NO_REF_FOUND_ERR_TEXT
 
-    if read_id in per_read_params_dict:
+    try:
         read_params_dict = per_read_params_dict[read_id]
-    else:
-        return None
+    except KeyError:
+        return None, NO_PARAMS_ERR_TEXT
 
     sig.set_trim_absolute(read_params_dict['trim_start'], read_params_dict['trim_end'])
 
@@ -55,49 +60,61 @@ def oneread_remap(read_tuple, references, model, device, per_read_params_dict,
         # Apply the network to the signal, generating transition weight matrix, and put it back into a numpy array
         with torch.no_grad():
             transweights = modelOnDevice(signalTensor).cpu().numpy()
-    except Exception as e:
-        sys.stderr.write("Failure applying basecall network to remap read {}.\n{}\n".format(sig.read_id, repr(e)))
-        return None
+    except Exception:
+        return None, REMAP_ERR_TEXT
 
     # Extra dimensions introduced by np.newaxis above removed by np.squeeze
+    can_read_ref = alphabet_info.collapse_sequence(read_ref)
     remappingscore, path = flipflop_remap.flipflop_remap(
-        np.squeeze(transweights), read_ref, localpen=0.0)
+        np.squeeze(transweights), can_read_ref,
+        alphabet=alphabet_info.can_bases, localpen=0.0)
     # read_ref comes out as a bytes object, so we need to convert to str
     # localpen=0.0 does local alignment
 
     # flipflop_remap() establishes a mapping between the network outputs and the reference.
     # What we need is a mapping between the signal and the reference.
     # To resolve this we need to know the stride of the model (how many samples for each network output)
-    model_stride = helpers.guess_model_stride(model, device=device)
-    remapping = mapping.Mapping.from_remapping_path(sig, path, read_ref, model_stride)
+    model_stride = helpers.guess_model_stride(model)
+    remapping = mapping.Mapping.from_remapping_path(
+        sig, path, read_ref, model_stride)
+    remapping.add_integer_reference(alphabet_info.alphabet)
 
-    return remapping.get_read_dictionary(read_params_dict['shift'], read_params_dict['scale'], read_id,
-                                      alphabet=alphabet, collapse_alphabet=collapse_alphabet)
+    return remapping.get_read_dictionary(read_params_dict['shift'],
+                                         read_params_dict['scale'],
+                                         read_id), REMAP_SUCCESS_TEXT
 
 
-
-def generate_output_from_results(results, args):
+def generate_output_from_results(results, output, alphabet_info):
     """
     Given an iterable of dictionaries, each representing the results of mapping
     a single read, output a mapped-read file.
-    This version outputs to the V7 'chunk' file format (actually containing mapped reads, not chunks)
+    This version outputs to the V8 'chunk' file format (actually containing mapped reads, not chunks)
 
     param: results     : an iterable of read dictionaries
                          (with mappings)
-    param: args        : command line args object
+    param: output      : output filename
+    param: alphabet_info : taiyaki.alphabet.AlphabetInfo instance
     """
     # progress = helpers.Progress()
+    err_types = defaultdict(int)
+    with mapped_signal_files.HDF5Writer(output, alphabet_info) as f:
+        for resultdict, mesg in results:
+            # filter out error messages for reporting later
+            if resultdict is None:
+                err_types[mesg] += 1
+            else:
+                # progress.step()
+                read_id = resultdict['read_id']
+                print(read_id, flush=True)
+                f.write_read(resultdict)
+    sys.stderr.write('\n')
 
-    # filter removes None and False and 0; filter(None,  is same as filter(o:o,
-    read_ids = []
-    with mapped_signal_files.HDF5(args.output, "w") as f:
-        f.write_version_number()
-        for readnumber, resultdict in enumerate(filter(None, results)):
-            # progress.step()
-            read_id = resultdict['read_id']
-            print(read_id, flush=True)
-            read_ids.append(read_id)
-            f.write_read(read_id, mapped_signal_files.Read(resultdict))
+    # report errors at the end to avoid spamming stderr
+    if len(err_types) > 0:
+        for err_str, n_errs in err_types.items():
+            sys.stderr.write((
+                '* {} reads failed to produce remapping results ' +
+                'due to: {}\n').format(n_errs, err_str))
 
 
 def get_per_read_params_dict_from_tsv(input_file):
@@ -113,5 +130,8 @@ def get_per_read_params_dict_from_tsv(input_file):
 
     per_read_params_dict = {}
     for row in per_read_params_array:
-        per_read_params_dict[row[0]] = {'trim_start': row[1], 'trim_end': row[2], 'shift': row[3], 'scale': row[4]}
+        per_read_params_dict[row[0]] = {'trim_start': row[1],
+                                        'trim_end': row[2],
+                                        'shift': row[3],
+                                        'scale': row[4]}
     return per_read_params_dict

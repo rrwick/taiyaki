@@ -186,27 +186,30 @@ class Mapping:
         copy_rights = np.diff(sig_to_ref_non_zeros)
 
         putative_ref_to_sig = np.repeat(sig_to_ref_non_zero_idxs[:-1], copy_rights)
-        putative_ref_to_sig = np.append(-1 * np.ones(sig_to_ref_non_zeros[0], dtype=np.int32), putative_ref_to_sig)
+        #Insert the right number of -1s to get to the beginning of the mapped region
+        if len(sig_to_ref_non_zeros) > 0:
+            first_nonzero_refpos = sig_to_ref_non_zeros[0]
+        else:
+            first_nonzero_refpos = reflen
+        putative_ref_to_sig = np.append(-1 * np.ones(first_nonzero_refpos, dtype=np.int32), putative_ref_to_sig)
 
         ref_to_sig = np.append(putative_ref_to_sig, siglen * np.ones(reflen +
                                                                      1 - len(putative_ref_to_sig), dtype=np.int32))
 
-        if len(ref_to_sig) != (reflen + 1):
-            with open('/media/groups_cs2/res_algo/active/aevans/taiyakiExperiments/integrate/DUMP.txt', "w") as f:
-                f.write('[' + (','.join([str(i) for i in self.signalpos_to_refpos])) + ']\n')
-            raise Exception("Length of constructed reftosignal ({}) != reflen ({}) + 1".format(len(ref_to_sig), reflen))
-
         return ref_to_sig
 
-    def get_read_dictionary(self, shift, scale, read_id, check=True, alphabet="ACGT", collapse_alphabet=None):
+    def add_integer_reference(self, alphabet):
+        self.integer_reference = np.array([
+            alphabet.index(i) for i in self.reference], dtype=np.int16)
+        return
+
+    def get_read_dictionary(self, shift, scale, read_id, check=True):
         """Return a read dictionary of the sort specified in mapped_signal_files.Read.
         Note that we return the dictionary, not the object itself.
         That's because this method is used inside worker processes which
         need to pass their results out through the pickling mechanism in imap_mp.
         Apply error checking if check = True, and raise an Exception if it fails"""
         readDict = {
-            'alphabet': alphabet,
-            'collapse_alphabet': alphabet if collapse_alphabet is None else collapse_alphabet,
             'shift_frompA': float(shift),
             'scale_frompA': float(scale),
             'range': float(self.signal.range),
@@ -214,7 +217,7 @@ class Mapping:
             'digitisation': float(self.signal.digitisation),
             'Dacs': self.signal.untrimmed_dacs.astype(np.int16),
             'Ref_to_signal': self.get_reftosignal(),
-            'Reference': np.array([alphabet.index(i) for i in self.reference], dtype=np.int16),
+            'Reference': self.integer_reference,
             'read_id': read_id
         }
         if check:

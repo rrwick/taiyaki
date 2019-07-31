@@ -22,7 +22,7 @@ class AcceptanceTest(unittest.TestCase):
         test_directory = os.path.splitext(__file__)[0]
         self.testset_work_dir = os.path.basename(test_directory)
         self.script = os.path.join(util.BIN_DIR, "dump_json.py")
-        self.model_file = os.path.join(util.MODELS_DIR, "mGru256_flipflop_remapping_model_r9_DNA.checkpoint")
+        self.model_file = os.path.join(util.MODELS_DIR, "mGru_flipflop_remapping_model_r9_DNA.checkpoint")
 
     def work_dir(self, test_name):
         directory = os.path.join(self.testset_work_dir, test_name)
@@ -52,14 +52,13 @@ class AcceptanceTest(unittest.TestCase):
         output_file = os.path.join(test_work_dir, "output.json")
         open(output_file, "w").close()
 
-        cmd = [self.script, self.model_file, "--out_file", output_file] + options
-        error_message = "RuntimeError: File/path for 'out_file' exists, {}".format(output_file)
+        cmd = [self.script, self.model_file, "--output", output_file] + options
+        error_message = "RuntimeError: File/path for 'output' exists, {}".format(output_file)
         util.run_cmd(self, cmd).expect_exit_code(1).expect_stderr(util.any_line_starts_with(error_message))
 
         os.remove(output_file)
 
-        info_message = "Writing to file:  {}".format(output_file)
-        util.run_cmd(self, cmd).expect_exit_code(0).expect_stdout(lambda o: o == [info_message])
+        util.run_cmd(self, cmd).expect_exit_code(0)
 
         self.assertTrue(os.path.exists(output_file))
         dump = open(output_file, 'r').read()

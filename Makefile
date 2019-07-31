@@ -13,8 +13,6 @@ CUDA ?= $(shell (which nvcc && nvcc --version) | grep -oP "(?<=release )[0-9.]+"
 # Determine correct torch package to install
 TORCH_CUDA_8.0 = cu80
 TORCH_CUDA_9.0 = cu90
-TORCH_CUDA_9.1 = cu90
-TORCH_CUDA_9.2 = cu90
 TORCH_CUDA_10.0 = cu100
 TORCH_PLATFORM ?= $(if $(TORCH_CUDA_$(CUDA)),$(TORCH_CUDA_$(CUDA)),cpu)
 PY3_MINOR = $(shell $(PYTHON) -c "import sys; print(sys.version_info.minor)")
@@ -26,8 +24,6 @@ TORCH ?= $(TORCH_$(shell uname -s))
 # determine correct cupy package to install
 CUPY_8.0 = cupy-cuda80
 CUPY_9.0 = cupy-cuda90
-CUPY_9.1 = cupy-cuda91
-CUPY_9.2 = cupy-cuda92
 CUPY_10.0 = cupy-cuda100
 CUPY ?= $(CUPY_$(CUDA))
 
@@ -44,6 +40,8 @@ envPrompt ?= "(taiyaki) "
 pyTestArgs ?=
 override pyTestArgs += --durations=20 -v
 
+buildDir = build
+
 
 .PHONY: install
 install:
@@ -51,9 +49,9 @@ install:
 	virtualenv --python=${PYTHON} --prompt=${envPrompt} ${envDir}
 	source ${envDir}/bin/activate && \
 	    python3 -m pip install pip --upgrade && \
-	    mkdir -p build/wheelhouse && \
-	    python3 -m pip download --dest build/wheelhouse ${TORCH} && \
-	    python3 -m pip install --find-links build/wheelhouse --no-index torch && \
+	    mkdir -p ${buildDir}/wheelhouse/${CUDA} && \
+	    python3 -m pip download --dest ${buildDir}/wheelhouse/${CUDA} ${TORCH} && \
+	    python3 -m pip install --find-links ${buildDir}/wheelhouse/${CUDA} --no-index torch && \
 	    python3 -m pip install -r requirements.txt ${CUPY} && \
 	    python3 -m pip install -r develop_requirements.txt && \
 	    ${PYTHON} setup.py develop
@@ -85,22 +83,22 @@ test: unittest
 
 .PHONY: unittest
 unittest:
-	${PYTHON} setup.py test --addopts "${pyTestArgs}"
+	mkdir -p ${buildDir}/unittest
+	cd ${buildDir}/unittest && ${PYTHON} -m pytest ${pyTestArgs} ../../test/unit
 
 
 .PHONY: acctest
 accset ?=
 acctest:
-	mkdir -p build/acctest
-	pip install -r test/acceptance/requirements.txt
-	cd build/acctest && ${PYTHON} -m pytest ${pyTestArgs} ../../test/acceptance/${accset}
+	mkdir -p ${buildDir}/acctest
+	python3 -m pip install -r test/acceptance/requirements.txt
+	cd ${buildDir}/acctest && ${PYTHON} -m pytest ${pyTestArgs} ../../test/acceptance/${accset}
 
 
 .PHONY: clean
 clean:
-	rm -rf build/ dist/ deb_dist/ *.egg-info/ ${envDir}/
-	rm taiyaki/ctc/ctc.c \
-		taiyaki/squiggle_match/squiggle_match.c taiyaki/version.py
+	rm -rf ${buildDir}/ dist/ deb_dist/ *.egg-info/ ${envDir}/
+	rm -f taiyaki/ctc/ctc.c taiyaki/squiggle_match/squiggle_match.c
 	find . -name '*.pyc' -delete
 	find . -name '*.so' -delete
 
@@ -119,4 +117,5 @@ workflow:
 	./workflow/remap_from_samrefs_then_train_test_workflow.sh
 	./workflow/remap_from_samrefs_then_train_multireadf5_test_workflow.sh
 	./workflow/remap_from_samrefs_then_train_squiggle_test_workflow.sh
+	./workflow/remap_from_mod_fasta_then_train_test_mod_workflow.sh
 #(The scripts each check to see if the training log file and chunk log file exist and contain data)

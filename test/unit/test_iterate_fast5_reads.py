@@ -1,13 +1,13 @@
 import os
 import unittest
 
-from . import THIS_DIR
+from . import DATA_DIR
 from taiyaki.fast5utils import iterate_fast5_reads
 
 
 class TestStrandList(unittest.TestCase):
-    READ_DIR = os.path.join(THIS_DIR, "../data/reads")
-    MULTIREAD_DIR = os.path.join(THIS_DIR, "../data/multireads")
+    READ_DIR = os.path.join(DATA_DIR, "reads")
+    MULTIREAD_DIR = os.path.join(DATA_DIR, "multireads")
     EXPECTED_READ_IDS = [
         '0f776a08-1101-41d4-8097-89136494a46e',
         '1f1a0f33-e2ac-431a-8f48-c3c687a7a7dc',
@@ -15,8 +15,9 @@ class TestStrandList(unittest.TestCase):
         'db6b45aa-5d21-45cf-a435-05fb8f12e839',
         'de1508c4-755b-489e-9ffb-51af35c9a7e6',
     ]
-    STRAND_LIST_DIR = os.path.join(THIS_DIR, "../data/strand_lists")
-    SEQUENCING_SUMMARY = os.path.join(THIS_DIR, "../data/basecaller_output/sequencing_summary.txt")
+    STRAND_LIST_DIR = os.path.join(DATA_DIR, "strand_lists")
+    SEQUENCING_SUMMARY = os.path.join(
+        DATA_DIR, "basecaller_output/sequencing_summary.txt")
 
     def _check_found_read_ids(self, found_reads):
         found_read_ids = sorted([rid for _, rid in found_reads])
@@ -50,3 +51,5 @@ class TestStrandList(unittest.TestCase):
     def test_strand_list_no_read_id_multiread(self):
         strand_list = os.path.join(self.STRAND_LIST_DIR, "strand_list_no_read_id.txt")
         self._check_found_read_ids(iterate_fast5_reads(self.MULTIREAD_DIR, strand_list=strand_list))
+
+    # TODO add recursive test (requires adding recursive data dir

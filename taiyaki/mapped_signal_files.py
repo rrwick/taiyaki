@@ -9,8 +9,9 @@ from abc import ABC, abstractmethod
 import h5py
 import numpy as np
 import random
+import posixpath
 
-_version = 7
+_version = 8
 
 class Read(dict):
     """Class to represent the information about a read that is stored in
@@ -40,20 +41,20 @@ class Read(dict):
     # dtype.
     # Also we use upper case for numpy arrays (or dataset in HDF5), lower case for scalar
     # in these dictionaries, although that is just an aid to reading and not checked in the code
-    read_data = {'alphabet': 'str',
-                 'collapse_alphabet': 'str',
-                 'shift_frompA': 'float',
-                 'scale_frompA': 'float',
-                 'range': 'float',
-                 'offset': 'float',
-                 'digitisation': 'float',
-                 'Dacs': 'np_int16',
-                 'Ref_to_signal': 'np_int32',
-                 'Reference': 'np_int16'}
+    read_data = {
+        'shift_frompA': 'float',
+        'scale_frompA': 'float',
+        'range': 'float',
+        'offset': 'float',
+        'digitisation': 'float',
+        'Dacs': 'np_int16',
+        'Ref_to_signal': 'np_int32',
+        'Reference': 'np_int16'}
 
-    optional_read_data = {'mapping_score': 'float',
-                          'mapping_method': 'str',
-                          'read_id': 'str'}
+    optional_read_data = {
+        'mapping_score': 'float',
+        'mapping_method': 'str',
+        'read_id': 'str'}
 
     def __init__(self, d):
         self.update(d)
@@ -144,7 +145,10 @@ class Read(dict):
         daclen = len(self['Dacs'])
         r = self['Ref_to_signal']
         mappedlocations = np.where((r >= 0) & (r < daclen))[0]  # Locations in the ref that are mapped
-        return np.min(mappedlocations), np.max(mappedlocations) + 1  # +1 to make it exclusive
+        if len(mappedlocations) > 0:
+            return np.min(mappedlocations), np.max(mappedlocations) + 1  # +1 to make it exclusive
+        else:
+            return 0,0
 
     def get_mapped_dacs_region(self):
         """Return tuple (start,end_exc) so that
@@ -153,7 +157,10 @@ class Read(dict):
         r = self['Ref_to_signal']
         daclen = len(self['Dacs'])
         r = r[(r >= 0) & (r < daclen)]  # Locations in the signal (not the end points -1, daclen ) that are mapped to
-        return np.min(r), np.max(r) + 1  # +1 to make it exclusive
+        if len(r) > 0:
+            return np.min(r), np.max(r) + 1  # +1 to make it exclusive
+        else:
+            return 0,0
 
     def get_reference_locations(self, signal_location_vector):
         """Return reference locations that go with given signal locations.
@@ -227,7 +234,7 @@ class Read(dict):
         Note there is no checking in this function that the dacs_region and ref_region
         are associated with one another. That must be done before calling this function.
 
-        If the optional data item read_id is not present in the read dictionary 
+        If the optional data item read_id is not present in the read dictionary
         then the 'read_id' item will be missing in the dictionary returned.
 
         The mean dwell is len(reference_sequence) / len(standardised_current),
@@ -278,7 +285,7 @@ class Read(dict):
         """
         mapped_dacs_region = self.get_mapped_dacs_region()
         spare_length = mapped_dacs_region[1] - mapped_dacs_region[0] - chunk_len
-        if spare_length < 0:
+        if spare_length <= 0:
             if verbose:
                 print("Rejecting read because spare_length=", spare_length,
                       ". mapped_dacs_region = ", mapped_dacs_region)
@@ -323,11 +330,11 @@ class Read(dict):
         dacsend_exc = self['Ref_to_signal'][refend_exc]
         #print("get_chunk_with_sequence_length(): ref region",refstart,refend_exc)
         #print("                                  sig region",dacstart,dacsend_exc)
-        
+
         return self._get_chunk((dacstart, dacsend_exc), (refstart, refend_exc))
 
 
-class AbstractMappedSignalFile(ABC):
+class AbstractMappedSignalReader(ABC):
     """Abstract base class for files containing mapped reads.
     Methods specified as abstractnethod must be overridden
     in derived classes.
@@ -382,19 +389,15 @@ class AbstractMappedSignalFile(ABC):
         """Return list of read ids, or empty list if none present"""
         pass
 
+    @property
     @abstractmethod
-    def get_version_number(self):
+    def version(self):
         """Return integer version number"""
         pass
 
     @abstractmethod
-    def write_read(self, read_id, read):
-        """Write a read to the appropriate place in the file, starting from a read object"""
-        pass
-
-    @abstractmethod
-    def write_version_number(self, version_number=_version):
-        """Get version number of file format"""
+    def get_alphabet_information(self):
+        """Return alphabet, collapse_alphabet and mod_long_names"""
         pass
 
     # This function is not abstract because it can be left as-is.
@@ -434,7 +437,7 @@ class AbstractMappedSignalFile(ABC):
         """Check the whole file, returning report in the form of a string"""
         return_string = ""
         try:
-            version_number = self.get_version_number()
+            version_number = self.version
             return_string += Read._typecheck('version', version_number, 'int')
         except:
             return_string += "Can't get version number\n"
@@ -456,7 +459,52 @@ class AbstractMappedSignalFile(ABC):
             return return_string
 
 
-class HDF5(AbstractMappedSignalFile):
+class AbstractMappedSignalWriter(ABC):
+    """Abstract base class for writing files containing mapped reads.
+    Methods specified as abstractmethod must be overridden
+    in derived classes.
+    Note that the methods to check reads and to check the metadata
+    are not abstract and should not be overridden.
+
+    The class has __enter__ and __exit__ so can be used as a context
+    manager (i.e. with the 'with' statement).
+
+    In all derived classes, the input and output from the file is done with
+    the read_dict defined above.
+
+    Derived classes should use the read class variables read_data and
+    optional_read_data
+    as much as possible so that changes made there will be propagated to the
+    derived classes.
+    """
+
+    def __enter__(self):
+        """Called when 'with' is used to create an object.
+        Since we always return the instance, no need to override this."""
+        return self
+
+    def __exit__(self, *args):
+        """No need to override this - just override the close() function.
+        Called when 'with' finishes."""
+        self.close()
+
+    @abstractmethod
+    def write_read(self, readdict):
+        """Write a read to the appropriate place in the file, starting from a read dictionary"""
+        pass
+
+    @abstractmethod
+    def _write_version(self):
+        """Write version number of file format"""
+        pass
+
+    @abstractmethod
+    def _write_alphabet_info(self, alphabet_info):
+        """Write alphabet information to file"""
+        pass
+
+
+class HDF5Reader(AbstractMappedSignalReader):
     """A file storing mapped data in an HDF5 in the simplest
     possible way.
     NOT using a derivative of the fast5 format.
@@ -465,17 +513,18 @@ class HDF5(AbstractMappedSignalFile):
     version is an attr, and the read data are stored
     as Datasets or attributes as appropriate.
 
-      file--|---Reads --|--<read_id_0>---- {
-            \           |                  {    (All the read data for read 0)
-             version    |
-                        |--<read_id_>----  {
-                        |                  {    (All the read data for read 1)
-
+      file--|---Reads ----------|--<read_id_0>-- {
+            \                   |                {(All the read data for read 0)
+             version            |
+             alphabet           |--<read_id_>--  {
+             collapse_alphabet  |                {(All the read data for read 1)
+             mod_long_names     |
 
     """
 
-    def __init__(self, filename, mode):
-        self.hdf5 = h5py.File(filename, mode)
+    def __init__(self, filename):
+        self.hdf5 = h5py.File(filename, 'r')
+        assert self.version == _version, 'Incorrect file version, got {} expected {}'.format(self.version, _version)
 
     def close(self):
         self.hdf5.close()
@@ -501,17 +550,58 @@ class HDF5(AbstractMappedSignalFile):
         except:
             return []
 
-    def get_version_number(self):
+    @property
+    def version(self):
         return self.hdf5.attrs['version']
 
-    def write_read(self, read_id, read):
+    def get_alphabet_information(self):
+        mod_long_names = self.hdf5.attrs['mod_long_names'].splitlines()
+        return (self.hdf5.attrs['alphabet'],
+                self.hdf5.attrs['collapse_alphabet'],
+                mod_long_names)
+
+
+class HDF5Writer(AbstractMappedSignalWriter):
+    """A file storing mapped data in an HDF5 in the simplest
+    possible way.
+    NOT using a derivative of the fast5 format.
+    This is an HDF5 file with structure below
+    There can be as many read_ids as you like.
+    version is an attr, and the read data are stored
+    as Datasets or attributes as appropriate.
+
+      file--|---Reads ----------|--<read_id_0>-- {
+            \                   |                {(All the read data for read 0)
+             version            |
+             alphabet           |--<read_id_>--  {
+             collapse_alphabet  |                {(All the read data for read 1)
+             mod_long_names     |
+
+    """
+    def __init__(self, filename, alphabet_info):
+        # mode 'w' to preserve behaviour, 'x' would be more appropraite
+        self.hdf5 = h5py.File(filename, 'w')
+        self._write_version()
+        self._write_alphabet_info(alphabet_info)
+
+    def close(self):
+        self.hdf5.close()
+
+    def write_read(self, readdict):
         """Write a read to the appropriate place in the file, starting from a read object"""
-        g = self.hdf5.create_group(self._get_read_path(read_id))
+        read = Read(readdict)
+        read_id = readdict['read_id']
+        g = self.hdf5.create_group(posixpath.join('Reads', read_id))
         for k, v in read.items():
             if isinstance(v, np.ndarray):
                 g.create_dataset(k, data=v)
             else:
                 g.attrs[k] = v
 
-    def write_version_number(self, version_number=_version):
-        self.hdf5.attrs['version'] = version_number
+    def _write_version(self):
+        self.hdf5.attrs['version'] = _version
+
+    def _write_alphabet_info(self, alphabet_info):
+        self.hdf5.attrs['alphabet'] = alphabet_info.alphabet
+        self.hdf5.attrs['collapse_alphabet'] = alphabet_info.collapse_alphabet
+        self.hdf5.attrs['mod_long_names'] = '\n'.join(alphabet_info.mod_long_names)

@@ -21,7 +21,7 @@ def flopmask(labels):
     return (cumulative_flipflops - offsets) % 2 == 1
 
 
-def flip_flop_code(labels, alphabet_length=4):
+def flipflop_code(labels, alphabet_length=4):
     """Given a list of digits representing bases, add offset to those in even
     positions within runs of indentical bases.
     param labels : np array of digits representing bases (usually 0-3 for ACGT)
@@ -32,9 +32,91 @@ def flip_flop_code(labels, alphabet_length=4):
 
     E.g.
     >> x=np.array([1, 3, 2, 3, 3, 3, 3, 1, 1])
-    >> flip_flop_code(x)
+    >> flipflop_code(x)
             array([1, 3, 2, 3, 7, 3, 7, 1, 5])
     """
     x = labels.copy()
     x[flopmask(x)] += alphabet_length
     return x
+
+
+def path_to_str(path, alphabet='ACGT'):
+    """ Convert flipflop path into a basecall string """
+    move = np.ediff1d(path, to_begin=1) != 0
+    alphabet = np.frombuffer((alphabet * 2).encode(), dtype='u1')
+    seq = alphabet[path[move]]
+    return seq.tobytes().decode()
+
+
+def extract_mod_weights(mod_weights, path, can_nmods):
+    """ Convert flipflop path into a basecall string """
+    # skip initial base from base calling that was never "moved into"
+    move = np.ediff1d(path, to_begin=0) != 0
+    path_vals = path[move]
+    # extract weights at basecall positions
+    bc_mod_weights = mod_weights[move[1:]]
+    curr_can_pos = 0
+    mods_scores = []
+    for base_i, can_nmod in enumerate(can_nmods):
+        if can_nmod > 0:
+            base_poss = np.where(np.equal(np.mod(
+                path_vals, len(can_nmods)), base_i))[0]
+        for mod_i in range(can_nmod):
+            mod_i_scores = np.full(
+                bc_mod_weights.shape[0] + 1, np.NAN)
+            # first base is always unmodified since it is never "moved into"
+            mod_i_scores[base_poss + 1] = bc_mod_weights[
+                base_poss, curr_can_pos + 1 + mod_i]
+            mods_scores.append(mod_i_scores)
+        curr_can_pos += 1 + can_nmod
+    mods_scores = np.stack(mods_scores, axis=1)
+
+    return mods_scores
+
+
+def cat_mod_code(labels, network):
+    """ Given a numpy array of digits representing bases, convert to canonical
+    flip-flop labels (defined by flipflopfings.flipflop_code) and
+    modified category values (defined by alphabet.AlphabetInfo).
+
+    :param labels: np array of digits representing bases
+    :param network: `taiyaki.layers.Serial` object with
+        `GlobalNormFlipFlopCatMod` last layer
+    returns: two np arrays representing 1) canonical flip-flop labels and
+        2) categorical modified base labels
+
+    E.g. (using alphabet='ACGTZYXW', collapse_alphabet='ACGTCAAT')
+    >> x = np.array([1, 5, 2, 4, 3, 3, 6, 7, 3])
+    >> cat_mod_code(x)
+          array(1, 0, 2, 1, 3, 7, 0, 3, 7), array(0, 1, 0, 1, 0, 0, 2, 1, 0)
+    """
+    assert is_cat_mod_model(network)
+    ff_layer = network.sublayers[-1]
+    mod_labels = np.ascontiguousarray(ff_layer.mod_labels[labels])
+    can_labels = np.ascontiguousarray(ff_layer.can_labels[labels])
+    ff_can_labels = flipflop_code(can_labels, ff_layer.ncan_base)
+    return ff_can_labels, mod_labels
+
+
+def nstate_flipflop(nbase):
+    """  Number of states in output of flipflop network
+
+    :param nbase: Number of letters in alphabet
+
+    :returns: Number of states
+    """
+    return 2 * nbase * (nbase + 1)
+
+
+def nbase_flipflop(nstate):
+    """  Number of letters in alphabet from flipflop network output size
+
+    :param nstate: Flipflop network output size
+
+    :returns: Number of letters in alphabet
+    """
+    nbase_f = np.sqrt(0.25 + (0.5 * nstate)) - 0.5
+    assert np.mod(nbase_f, 1) == 0, (
+        'Number of states not valid for flip-flop model. ' +
+        'nstates: {}\tconverted nbases: {}').format(nstate, nbase_f)
+    return int(np.round(nbase_f))

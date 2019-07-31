@@ -8,17 +8,26 @@ import re
 import sys
 import torch
 
-from taiyaki import maths
 from taiyaki.fileio import readtsv
-from taiyaki.variables import DEFAULT_ALPHABET
-
-
+from taiyaki.constants import DEFAULT_ALPHABET
 
 
 def _load_python_model(model_file, **model_kwargs):
     netmodule = imp.load_source('netmodule', model_file)
     network = netmodule.network(**model_kwargs)
     return network
+
+
+def save_model(network, output, index=None):
+    if index is None:
+        basename = 'model_final'
+    else:
+        basename = 'model_checkpoint_{:05d}'.format(index)
+
+    model_file = os.path.join(output, basename + '.checkpoint')
+    torch.save(network, model_file)
+    params_file = os.path.join(output, basename + '.params')
+    torch.save(network.state_dict(), params_file)
 
 
 def load_model(model_file, params_file=None, **model_kwargs):
@@ -36,57 +45,12 @@ def load_model(model_file, params_file=None, **model_kwargs):
     return network
 
 
-def guess_model_stride(net, input_shape=(720, 1, 1), device='cpu'):
+def guess_model_stride(net, input_shape=(720, 1, 1)):
     """ Infer the stride of a pytorch network by running it on some test input.
-    Assume that net is already able to accept input on device specified"""
-    out = net(torch.zeros(input_shape).to(device))
-    return int(round(input_shape[0] / out.size()[0]))
-
-
-def objwalk(obj, types=(object,), path=(), memo=None):
-    """Recursively walk a python object yielding instances of specified types
-
-    Ripped off from: https://goo.gl/brwMce
     """
-    if memo is None:
-        memo = set()
-
-    if isinstance(obj, Mapping):
-        children = obj.items()
-    elif isinstance(obj, Sequence) and not isinstance(obj, (bytes, str)):
-        children = enumerate(obj)
-    elif hasattr(obj, "__dict__"):
-        children = vars(obj).items()
-    else:
-        children = []
-
-    if id(obj) not in memo:
-        memo.add(id(obj))
-
-        if isinstance(obj, types):
-            yield path, obj
-
-        for (path_component, value) in children:
-            for res in objwalk(value, types, path + (path_component,), memo):
-                yield res
-
-
-def set_at_path(obj, path, val):
-    """Set value on object following a path as built by objwalk"""
-    if len(path) == 1:
-        if isinstance(obj, Mapping):
-            obj[path[0]] = val
-        elif isinstance(obj, Sequence) and not isinstance(obj, (bytes, str)):
-            obj[path[0]] = val
-        else:
-            setattr(obj, path[0], val)
-    elif len(path) > 1:
-        if isinstance(obj, Mapping):
-            set_at_path(obj[path[0]], path[1:], val)
-        elif isinstance(obj, Sequence) and not isinstance(obj, (bytes, str)):
-            set_at_path(obj[path[0]], path[1:], val)
-        else:
-            set_at_path(obj.__dict__[path[0]], path[1:], val)
+    net_device = next(net.parameters()).device
+    out = net(torch.zeros(input_shape).to(net_device))
+    return int(round(input_shape[0] / out.size()[0]))
 
 
 def get_kwargs(args, names):
@@ -124,28 +88,9 @@ def fasta_file_to_dict(fasta_file_name, allow_N=False, alphabet=DEFAULT_ALPHABET
                 continue
             if not allow_N and re.search(has_nonalphabet, refseq) is not None:
                 continue
-            references[ref.id] = refseq.encode('utf-8')
+            references[ref.id] = refseq
 
     return references
-
-
-class ReadIndex(dict):
-    """dict subclass mapping from read names (str or bytes) to index (int)"""
-    @staticmethod
-    def _force_str(s):
-        return s.decode('utf-8') if isinstance(s, bytes) else s
-
-    def __init__(self, *args, **kwargs):
-        data = dict(*args, **kwargs)
-        items = ((ReadIndex._force_str(basename), read_id) for basename, read_id in data.items())
-        super().__init__(items)
-
-    def to_numpy(self):
-        """Convert ReadIndex instance into a numpy structured array"""
-        max_key_len = max(map(len, self.keys()))
-        key_dtype = 'S{}'.format(max_key_len)
-        dtype = [('read_name', key_dtype), ('read_id', '<u4')]
-        return np.fromiter(self.items(), dtype=dtype)
 
 
 def get_column_from_tsv(tsv_file_name, column):
@@ -184,6 +129,36 @@ class ExponentialSmoother(object):
         self.weight = self.factor * self.weight + (1.0 - self.factor) * weight
 
 
+class WindowedExpSmoother(object):
+    """ Smooth values using exponential decay over a fixed range of values
+
+    :param alpha: exponential decay factor
+    :param n_vals: maximum number of values in reported smoothed value
+    """
+    def __init__(self, alpha=0.95, n_vals=100):
+        assert 0.0 <= alpha <= 1.0, (
+            "Alpha was {}, should be between 0.0 and 1.0.\n".format(
+                alpha))
+        self.alpha = alpha
+        self.weights = np.power(alpha, np.arange(n_vals))
+        self.vals = np.full(n_vals, np.NAN)
+        self.n_valid_vals = 0
+        return
+
+    @property
+    def value(self):
+        if self.n_valid_vals == 0: return np.NAN
+        return np.average(
+            self.vals[:self.n_valid_vals],
+            weights=self.weights[:self.n_valid_vals])
+
+    def update(self, val):
+        self.vals[1:] = self.vals[:-1]
+        self.vals[0] = val
+        self.n_valid_vals += 1
+        return
+
+
 class Logger(object):
 
     def __init__(self, log_file_name, quiet=False):
@@ -220,21 +195,23 @@ COLOURS = [91, 93, 95, 92, 35, 33, 94]
 class Progress(object):
     """A dotty way of showing progress"""
 
-    def __init__(self, fh=sys.stderr, every=1, maxlen=50):
+    def __init__(self, fh=sys.stderr, every=1, maxlen=50, quiet=False):
         assert maxlen > 0
         self._count = 0
         self.every = every
         self._line_len = maxlen
         self.fh = fh
+        self.quiet = quiet
 
     def step(self):
         self._count += 1
-        if self.count % self.every == 0:
-            dotcount = self.count // self.every
-            self.fh.write('\033[1;{}m.\033[m'.format(COLOURS[dotcount % len(COLOURS)]))
-            if dotcount % self.line_len == 0:
-                self.fh.write('{:8d}\n'.format(self.count))
-            self.fh.flush()
+        if not self.quiet:
+            if self.count % self.every == 0:
+                dotcount = self.count // self.every
+                self.fh.write('\033[1;{}m.\033[m'.format(COLOURS[dotcount % len(COLOURS)]))
+                if dotcount % self.line_len == 0:
+                    self.fh.write('{:8d}\n'.format(self.count))
+                self.fh.flush()
 
     @property
     def line_len(self):
@@ -251,3 +228,26 @@ class Progress(object):
     @property
     def is_newline(self):
         return self.count % (self.dotcount * self.line_len) == 0
+
+
+class open_file_or_stdout():
+    """  Simple context manager that acts like `open`
+
+    If filename is None, uses stdout.
+
+    :param filename: Name or file to open, or None for stdout
+    """
+    def __init__(self, filename):
+        self.filename = filename
+
+    def __enter__(self):
+        if self.filename is None:
+            self.fh = sys.stdout
+        else:
+            self.fh = open(self.filename, 'w')
+        return self.fh
+
+    def __exit__(self, *args):
+        if self.filename is not None:
+            self.fh.close()
+

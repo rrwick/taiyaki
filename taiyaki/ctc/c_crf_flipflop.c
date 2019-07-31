@@ -6,9 +6,6 @@
 
 #include "c_crf_flipflop.h"
 
-#define _OFFSET_STAY 32
-#define _NSTATE 8
-#define _NBASE 4
 #define LARGE_VAL 1e30f
 
 
@@ -16,20 +13,39 @@ static inline float logsumexpf(float x, float y, float a){
     return fmaxf(x, y) + log1pf(expf(-a * fabsf(x-y))) / a;
 }
 
-void crf_flipflop_forward_step(float const * logpost, float const * fwdprev, int32_t const * seq,
-                               size_t nseqpos, float * fwdcurr, float sharpfact){
+static inline size_t nstate_to_nbase(size_t ntrans_state){
+    double nbase_d = sqrt(0.25 + (0.5 * ntrans_state)) - 0.5;
+    assert(fmod(nbase_d, 1.0) == 0.0);
+    return (size_t) round(nbase_d);
+}
+
+
+/*
+******************************
+Training/groud truth functions
+******************************
+ */
+
+
+void crf_flipflop_forward_step(float const * logprob, float const * fwdprev,
+                               int32_t const * seq, size_t nseqpos,
+                               float * fwdcurr, float sharpfact,
+                               size_t nbase){
     assert(nseqpos > 0);
-    assert(NULL != logpost);
+    assert(NULL != logprob);
     assert(NULL != fwdprev);
     assert(NULL != seq);
     assert(NULL != fwdcurr);
 
+    assert(nbase > 0);
+    const size_t offset_stay = nbase * (nbase + nbase);
 
     for(size_t pos=0 ; pos < nseqpos ; pos++){
         // Stay in current position
         const size_t base = seq[pos];
-        fwdcurr[pos] = (base < _NBASE) ? logpost[base * _NSTATE + base]:
-                                         logpost[_OFFSET_STAY + base];
+        fwdcurr[pos] = (base < nbase) ?
+          logprob[base * (nbase + nbase) + base]:
+          logprob[offset_stay + base];
         fwdcurr[pos] += fwdprev[pos];
     }
     for(size_t pos=1 ; pos < nseqpos ; pos++){
@@ -38,18 +54,22 @@ void crf_flipflop_forward_step(float const * logpost, float const * fwdprev, int
         const size_t base_from = seq[pos - 1];
 
         assert(base_to != base_from);  // Can't have repeated bases
-        assert(base_to < _NBASE || base_from + _NBASE == base_to);
-        const float score = (base_to < _NBASE) ? logpost[base_to * _NSTATE + base_from] :
-                                                 logpost[_OFFSET_STAY + base_from];
-        fwdcurr[pos] = logsumexpf(fwdcurr[pos], fwdprev[pos - 1] + score, sharpfact);
+        assert(base_to < nbase || base_from + nbase == base_to);
+        const float score = (base_to < nbase) ?
+            logprob[base_to * (nbase + nbase) + base_from] :
+            logprob[offset_stay + base_from];
+        fwdcurr[pos] = logsumexpf(fwdcurr[pos],
+                                  fwdprev[pos - 1] + score,
+                                  sharpfact);
     }
 }
 
 
-float crf_flipflop_forward(float const * logpost, size_t nblk, size_t ldp, int32_t const * seq,
-                           size_t nseqpos, float sharpfact, float * fwd){
+float crf_flipflop_forward(float const * logprob, size_t nblk, size_t ldp,
+                           int32_t const * seq, size_t nseqpos,
+                           float sharpfact, float * fwd, size_t nbase){
     assert(nseqpos > 0);
-    assert(NULL != logpost);
+    assert(NULL != logprob);
     assert(NULL != seq);
     assert(NULL != fwd);
 
@@ -62,9 +82,10 @@ float crf_flipflop_forward(float const * logpost, size_t nblk, size_t ldp, int32
     for(size_t blk=0 ; blk < nblk ; blk++){
         float const * fwdprev = fwd + blk * nseqpos;
         float * fwdcurr = fwd + (blk + 1) * nseqpos;
-        float const * logpostcurr = logpost + blk * ldp;
+        float const * logprobcurr = logprob + blk * ldp;
 
-        crf_flipflop_forward_step(logpostcurr, fwdprev, seq, nseqpos, fwdcurr, sharpfact);
+        crf_flipflop_forward_step(logprobcurr, fwdprev, seq, nseqpos,
+                                  fwdcurr, sharpfact, nbase);
     }
 
     // Final score is sum of final state + its stay
@@ -73,22 +94,25 @@ float crf_flipflop_forward(float const * logpost, size_t nblk, size_t ldp, int32
 }
 
 
-void crf_flipflop_backward_step(float const * logpost, float const * bwdprev, int32_t const * seq,
-                                size_t nseqpos, float * bwdcurr, float sharpfact){
+void crf_flipflop_backward_step(float const * logprob, float const * bwdprev,
+                                int32_t const * seq, size_t nseqpos,
+                                float * bwdcurr, float sharpfact,
+                                size_t nbase){
     assert(nseqpos > 0);
-    assert(NULL != logpost);
+    assert(NULL != logprob);
     assert(NULL != bwdprev);
     assert(NULL != seq);
     assert(NULL != bwdcurr);
 
+    assert(nbase > 0);
+    const size_t offset_stay = nbase * (nbase + nbase);
 
     for(size_t pos=0 ; pos < nseqpos ; pos++){
         // Stay in current position
         const size_t base = seq[pos];
-        bwdcurr[pos] = (base < _NBASE) ? logpost[base * _NSTATE + base]:
-                                         logpost[_OFFSET_STAY + base];
+        bwdcurr[pos] = (base < nbase) ? logprob[base * (nbase + nbase) + base]:
+            logprob[offset_stay + base];
         bwdcurr[pos] += bwdprev[pos];
-
     }
     for(size_t pos=1 ; pos < nseqpos ; pos++){
         // Move to new position
@@ -96,21 +120,24 @@ void crf_flipflop_backward_step(float const * logpost, float const * bwdprev, in
         const size_t base_from = seq[pos - 1];
 
         assert(base_to != base_from);  // Can't have repeated bases
-        assert(base_to < _NBASE || base_from + _NBASE == base_to);
-        const float score = (base_to < _NBASE) ? logpost[base_to * _NSTATE + base_from] :
-                                                 logpost[_OFFSET_STAY + base_from];
-        bwdcurr[pos - 1] = logsumexpf(bwdcurr[pos - 1], bwdprev[pos] + score, sharpfact);
+        assert(base_to < nbase || base_from + nbase == base_to);
+        const float score = (base_to < nbase) ?
+            logprob[base_to * (nbase + nbase) + base_from] :
+            logprob[offset_stay + base_from];
+        bwdcurr[pos - 1] = logsumexpf(bwdcurr[pos - 1],
+                                      bwdprev[pos] + score,
+                                      sharpfact);
     }
 }
 
 
-float crf_flipflop_backward(float const * logpost, size_t nblk, size_t ldp, int32_t const * seq,
-                            size_t nseqpos, float sharpfact, float * bwd){
+float crf_flipflop_backward(float const * logprob, size_t nblk, size_t ldp,
+                            int32_t const * seq, size_t nseqpos,
+                            float sharpfact, float * bwd, size_t nbase){
     assert(nseqpos > 0);
-    assert(NULL != logpost);
+    assert(NULL != logprob);
     assert(NULL != seq);
     assert(NULL != bwd);
-
 
     //  Point prior -- must have ended in either final stay or state
     for(size_t pos=0 ; pos < nseqpos ; pos++){
@@ -122,18 +149,21 @@ float crf_flipflop_backward(float const * logpost, size_t nblk, size_t ldp, int3
     for(size_t blk=nblk ; blk > 0 ; blk--){
         float const * bwdprev = bwd + blk * nseqpos;
         float * bwdcurr = bwd + (blk - 1) * nseqpos;
-        float const * logpostcurr = logpost + (blk - 1) * ldp;
+        float const * logprobcurr = logprob + (blk - 1) * ldp;
 
-        crf_flipflop_backward_step(logpostcurr, bwdprev, seq, nseqpos, bwdcurr, sharpfact);
+        crf_flipflop_backward_step(logprobcurr, bwdprev, seq, nseqpos,
+                                   bwdcurr, sharpfact, nbase);
     }
 
     return bwd[0];
 }
 
 
-void crf_flipflop_cost(float const * logprob, size_t nstate, size_t nblk , size_t nbatch,
-                       int32_t const * seqs, int32_t const * seqlen, float sharpfact, float * score){
-    size_t ldp = nbatch * nstate;
+void crf_flipflop_cost(float const * logprob, size_t ntrans_state, size_t nblk,
+                       size_t nbatch, int32_t const * seqs,
+                       int32_t const * seqlen, float sharpfact, float * score){
+    const size_t nbase = nstate_to_nbase(ntrans_state);
+    const size_t ldp = nbatch * ntrans_state;
     size_t seqidx[nbatch];
     seqidx[0] = 0;
     for(size_t idx=1 ; idx < nbatch ; idx++){
@@ -147,26 +177,37 @@ void crf_flipflop_cost(float const * logprob, size_t nstate, size_t nblk , size_
              continue;
          }
 
-        const size_t offset = batch * nstate;
+        const size_t batch_offset = batch * ntrans_state;
         float * fwd = calloc((1 + nblk) * seqlen[batch], sizeof(float));
-        score[batch] = crf_flipflop_forward(logprob + offset, nblk, ldp, seqs + seqidx[batch],
-                                            seqlen[batch], sharpfact, fwd);
+        if(NULL == fwd){
+            free(fwd);
+            score[batch] = NAN;
+            continue;
+        }
+        score[batch] =
+          crf_flipflop_forward(logprob + batch_offset, nblk, ldp,
+                               seqs + seqidx[batch], seqlen[batch],
+                               sharpfact, fwd, nbase);
         free(fwd);
     }
 }
 
 
-void crf_flipflop_scores_fwd(float const * logprob, size_t nstate, size_t nblk , size_t nbatch,
-                             int32_t const * seqs, int32_t const * seqlen, float sharpfact,
+void crf_flipflop_scores_fwd(float const * logprob, size_t ntrans_state,
+                             size_t nblk, size_t nbatch, int32_t const * seqs,
+                             int32_t const * seqlen, float sharpfact,
                              float * score){
-    crf_flipflop_cost(logprob, nstate, nblk, nbatch, seqs, seqlen, sharpfact, score);
+    crf_flipflop_cost(logprob, ntrans_state, nblk, nbatch, seqs, seqlen,
+                      sharpfact, score);
 }
 
 
-void crf_flipflop_scores_bwd(float const * logprob, size_t nstate, size_t nblk , size_t nbatch,
-                             int32_t const * seqs, int32_t const * seqlen, float sharpfact,
+void crf_flipflop_scores_bwd(float const * logprob, size_t ntrans_state,
+                             size_t nblk, size_t nbatch, int32_t const * seqs,
+                             int32_t const * seqlen, float sharpfact,
                              float * score){
-    size_t ldp = nbatch * nstate;
+    const size_t nbase = nstate_to_nbase(ntrans_state);
+    const size_t ldp = nbatch * ntrans_state;
     size_t seqidx[nbatch];
     seqidx[0] = 0;
     for(size_t idx=1 ; idx < nbatch ; idx++){
@@ -179,47 +220,62 @@ void crf_flipflop_scores_bwd(float const * logprob, size_t nstate, size_t nblk ,
              score[batch] = 0.0;
              continue;
          }
-        const size_t offset = batch * nstate;
+        const size_t offset = batch * ntrans_state;
         float * bwd = calloc((1 + nblk) * seqlen[batch], sizeof(float));
-        score[batch] = crf_flipflop_backward(logprob + offset, nblk, ldp, seqs + seqidx[batch],
-                                             seqlen[batch], sharpfact, bwd);
+        if(NULL == bwd){
+            free(bwd);
+            score[batch] = NAN;
+            continue;
+        }
+        score[batch] =
+          crf_flipflop_backward(logprob + offset, nblk, ldp,
+                                seqs + seqidx[batch], seqlen[batch],
+                                sharpfact, bwd, nbase);
         free(bwd);
     }
 }
 
 
-void crf_flipflop_grad_step(float const * fwdcurr, float const * bwdnext, float const * logprob,
-                            int32_t const * seq, int32_t nseqpos, float * grad, size_t nstate,
+void crf_flipflop_grad_step(float const * fwdcurr, float const * bwdnext,
+                            float const * logprob, int32_t const * seq,
+                            size_t nseqpos, float * grad, size_t ntrans_state,
                             float fact, float sharpfact){
+    const size_t nbase = nstate_to_nbase(ntrans_state);
+    const size_t offset_stay = nbase * (nbase + nbase);
 
-        // Make sure gradient calc is zero'd
-        memset(grad, 0, nstate * sizeof(float));
+    // Make sure gradient calc is zero'd
+    memset(grad, 0, ntrans_state * sizeof(float));
 
-        for(size_t pos=0 ; pos < nseqpos ; pos++){
-            // State state
-            const size_t base = seq[pos];
-            const size_t idx = (base < _NBASE) ? (base * _NSTATE + base)
-                                               : (_OFFSET_STAY + base);
-            grad[idx] += expf(sharpfact * (fwdcurr[pos] + bwdnext[pos] + logprob[idx] - fact));
-        }
-        for(size_t pos=1 ; pos < nseqpos ; pos++){
-            const size_t base_to = seq[pos];
-            const size_t base_from = seq[pos - 1];
-            const size_t idx = (base_to < _NBASE) ? (base_to * _NSTATE + base_from)
-                                                  : (_OFFSET_STAY + base_from);
+    for(size_t pos=0 ; pos < nseqpos ; pos++){
+        // Stay state
+        const size_t base = seq[pos];
+        const size_t idx = (base < nbase) ?
+          (base * (nbase + nbase) + base) :
+          (offset_stay + base);
+        grad[idx] += expf(sharpfact * (fwdcurr[pos] + bwdnext[pos] +
+                                       logprob[idx] - fact));
+    }
+    for(size_t pos=1 ; pos < nseqpos ; pos++){
+        // Move state
+        const size_t base_to = seq[pos];
+        const size_t base_from = seq[pos - 1];
+        const size_t idx = (base_to < nbase) ?
+          (base_to * (nbase + nbase) + base_from) :
+          (offset_stay + base_from);
 
-            assert(base_to != base_from);  // Can't have repeated bases
-            assert(base_to < _NBASE || base_from + _NBASE == base_to);
-            grad[idx] += expf(sharpfact * (fwdcurr[pos - 1] + bwdnext[pos] + logprob[idx] - fact));
-        }
+        assert(base_to != base_from);  // Can't have repeated bases
+        assert(base_to < nbase || base_from + nbase == base_to);
+        grad[idx] += expf(sharpfact * (fwdcurr[pos - 1] + bwdnext[pos] +
+                                       logprob[idx] - fact));
+    }
 }
 
-
-void crf_flipflop_grad(float const * logprob, size_t nstate, size_t nblk , size_t nbatch,
-                       int32_t const * seqs, int32_t const * seqlen, float sharpfact,
-                       float * score, float * grad){
-    const size_t ldp = nbatch * nstate;
-
+void crf_flipflop_grad(float const * logprob, size_t ntrans_state, size_t nblk,
+                       size_t nbatch, int32_t const * seqs,
+                       int32_t const * seqlen, float sharpfact, float * score,
+                       float * grad){
+    const size_t ldp = nbatch * ntrans_state;
+    const size_t nbase = nstate_to_nbase(ntrans_state);
     size_t seqidx[nbatch];
     seqidx[0] = 0;
     for(size_t idx=1 ; idx < nbatch ; idx++){
@@ -228,27 +284,39 @@ void crf_flipflop_grad(float const * logprob, size_t nstate, size_t nblk , size_
 
 #pragma omp parallel for
     for(size_t batch=0 ; batch < nbatch ; batch++){
-        const size_t batch_offset = batch * nstate;
+        const size_t batch_offset = batch * ntrans_state;
         if(0 == seqlen[batch]){
             for(size_t blk=0 ; blk < nblk ; blk++){
-                memset(grad + batch_offset + blk * nbatch * nstate, 0, nstate * sizeof(float));
+                memset(grad + batch_offset + blk * ldp, 0,
+                       ntrans_state * sizeof(float));
             }
             continue;
         }
-        const int32_t nseqpos = seqlen[batch];
+        const size_t nseqpos = seqlen[batch];
         int32_t const * seq = seqs + seqidx[batch];
         float * fwd = calloc((nblk + 1) * nseqpos, sizeof(float));
         float * bwd = calloc((nblk + 1) * nseqpos, sizeof(float));
-        score[batch] = crf_flipflop_forward(logprob + batch_offset, nblk, ldp, seq, nseqpos, sharpfact, fwd);
-        crf_flipflop_backward(logprob + batch_offset, nblk, ldp, seq, nseqpos, sharpfact, bwd);
+        if(NULL == fwd || NULL == bwd){
+            free(fwd);
+            free(bwd);
+            // TODO set grad values to NAN in order to propogate memory error
+            continue;
+        }
+        score[batch] =
+            crf_flipflop_forward(logprob + batch_offset, nblk, ldp, seq,
+                                 nseqpos, sharpfact, fwd, nbase);
+        // TODO compute backwards while computing gradient to reduce memory
+        // footprint
+        crf_flipflop_backward(logprob + batch_offset, nblk, ldp, seq,
+                              nseqpos, sharpfact, bwd, nbase);
 
         // Normalised transition matrix
         for(size_t blk=0 ; blk < nblk ; blk++){
             float const * fwdcurr = fwd + blk * nseqpos;
             float const * bwdcurr = bwd + blk * nseqpos;
             float const * bwdnext = bwd + blk * nseqpos + nseqpos;
-            float const * logprobcurr = logprob + batch_offset + blk * nbatch * nstate;
-            float * gradcurr = grad + batch_offset + blk * nbatch * nstate;
+            float const * logprobcurr = logprob + batch_offset + blk * ldp;
+            float * gradcurr = grad + batch_offset + blk * ldp;
 
             //  Recalculate close to position to reduce numerical error
             float fact = fwdcurr[0] + bwdcurr[0];
@@ -256,14 +324,14 @@ void crf_flipflop_grad(float const * logprob, size_t nstate, size_t nblk , size_
                 fact = logsumexpf(fact, fwdcurr[pos] + bwdcurr[pos], sharpfact);
             }
 
-            crf_flipflop_grad_step(fwdcurr, bwdnext, logprobcurr, seq, nseqpos, gradcurr, nstate, fact, sharpfact);
+            crf_flipflop_grad_step(fwdcurr, bwdnext, logprobcurr, seq, nseqpos,
+                                   gradcurr, ntrans_state, fact, sharpfact);
         }
 
         free(bwd);
         free(fwd);
     }
 }
-
 
 
 #ifdef CRF_TWOSTATE_TEST
