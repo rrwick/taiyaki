@@ -116,7 +116,7 @@ def main():
     if args.limit is not None:
         log.write('* Limiting number of strands to {} per file\n'.format(args.limit))
 
-    read_data, alphabet = load_read_data(args.input, args.limit, log)
+    read_data, alphabet = load_read_data(args.input, args.limit, log, read_ids)
     if len(read_data) == 0:
         log.write('* No reads remaining for training, exiting.\n')
         exit(1)
@@ -273,29 +273,22 @@ def main():
             # Periodically reload the training data to get a different random subset.
             read_data = None
             gc.collect()
-            read_data = load_read_data(args.input, args.limit)
+            read_data = load_read_data(args.input, args.limit, log, read_ids)
 
     helpers.save_model(network, args.output)
 
 
-def load_read_data(input_files, read_limit, log):
+def load_read_data(input_files, read_limit, log, read_ids):
     read_data = []
-    alphabet = None
     for input_file in input_files:
         log.write('* Loading data from {}\n'.format(input_file))
         log.write('* Per read file MD5 {}\n'.format(helpers.file_md5(input_file)))
-        with mapped_signal_files.HDF5Reader(input_file) as per_read_file:
-
-            # Use the longest alphabet in any of the input files.
-            file_alphabet, _, _ = per_read_file.get_alphabet_information()
-            if alphabet is None or len(file_alphabet) > len(alphabet):
-                alphabet = file_alphabet
-
+        with mapped_signal_files.HDF5(input_file, "r") as per_read_file:
             read_data += per_read_file.get_multiple_reads(read_ids, max_reads=read_limit)
             # read_data now contains a list of reads
             # (each an instance of the Read class defined in mapped_signal_files.py, based on dict)
     random.shuffle(read_data)
-    return read_data, alphabet
+    return read_data, ['A', 'C', 'G', 'T']
 
 
 if __name__ == '__main__':
